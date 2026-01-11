@@ -10,7 +10,7 @@ const app = new Hono().basePath('/api')
 // =======================
 // CONFIGURATION
 // =======================
-const ACCESS_PASSWORD = "1234"; // Password ပြောင်းရန်
+const ACCESS_PASSWORD = "1234"; 
 
 // =======================
 // 1. UI & AUTH
@@ -122,9 +122,16 @@ async function handleRequest(c: any, filename: string, method: string) {
         const fileRes = await fetch(finalStreamUrl, { method: method, headers: fetchHeaders });
 
         const newHeaders = new Headers();
+        
+        // --- ပြင်ဆင်ထားသောအပိုင်း (Fixing the Error) ---
         ["content-type", "content-length", "content-range", "accept-ranges", "last-modified", "etag"].forEach(h => {
-            if (fileRes.headers.has(h)) newHeaders.set(h, fileRes.headers.get(h));
+            const headerValue = fileRes.headers.get(h);
+            // headerValue ရှိမှသာ set မည် (null ဖြစ်နေရင် မလုပ်တော့ဘူး)
+            if (headerValue) {
+                newHeaders.set(h, headerValue);
+            }
         });
+        // ------------------------------------------
 
         newHeaders.set("Content-Disposition", `attachment; filename="${filename}"`);
         newHeaders.set("Access-Control-Allow-Origin", "*");
