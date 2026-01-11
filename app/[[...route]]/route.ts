@@ -1,17 +1,14 @@
 import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { getCookie, setCookie } from 'hono/cookie'
-import { createClient } from '@vercel/kv' // Library ခေါ်ပုံ ပြောင်းထားသည်
+import { createClient } from '@vercel/kv'
 
 export const runtime = 'edge';
 
 const app = new Hono().basePath('')
 const ACCESS_PASSWORD = "1234"; 
 
-// ============================================
-// DATABASE SETUP (UNIVERSAL)
-// Variable နာမည် ဘယ်လိုလာလာ အလုပ်လုပ်မယ့် နည်းလမ်း
-// ============================================
+// Database Setup
 const kv = createClient({
   url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "",
   token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "",
@@ -41,14 +38,7 @@ app.post('/create', async (c) => {
         const originalUrl = body.url as string;
         let fileName = body.name as string;
 
-        if (!originalUrl || !fileName) return c.json({ success: false, error: "URL and Name required" });
-
-        // Database Connection Test
-        try {
-            await kv.set('test_db', 'ok');
-        } catch (e) {
-            return c.json({ success: false, error: "Database Connection Failed. Check Env Vars." });
-        }
+        if (!originalUrl || !fileName) return c.json({ success: false, error: "Required fields missing" });
 
         fileName = fileName.trim().replace(/[^a-zA-Z0-9._-]/g, "_"); 
         if (!fileName.match(/\.(mp4|mkv|mov|avi|zip|rar)$/i)) fileName += ".mp4";
@@ -57,7 +47,9 @@ app.post('/create', async (c) => {
         if (exists) return c.json({ success: false, error: "Filename already exists!" });
 
         const type = originalUrl.includes("mediafire.com") ? "mediafire" : "direct";
-        await kv.set(`media:${fileName}`, { url: originalUrl, type: type, views: 0 });
+        
+        // Link အရင်းအမြစ်ကိုပဲ သိမ်းမယ် (Direct Link ကို မသိမ်းတော့ဘူး)
+        await kv.set(`media:${fileName}`, { url: originalUrl, type: type });
 
         const host = c.req.header('host');
         const protocol = host?.includes('localhost') ? 'http' : 'https';
@@ -87,25 +79,27 @@ async function handleRequest(c: any, filename: string, method: string) {
         let finalStreamUrl = null;
 
         if (fileData.type === "mediafire") {
-            const cacheKey = `cache:${filename}`;
-            const cachedLink = await kv.get(cacheKey) as string;
-            if (cachedLink) {
-                finalStreamUrl = cachedLink;
-            } else {
-                try {
-                    const pageRes = await fetch(fileData.url, { headers: { "User-Agent": "Mozilla/5.0" } });
-                    const html = await pageRes.text();
-                    let match = html.match(/aria-label="Download file"\s+href="([^"]+)"/);
-                    if (!match) match = html.match(/id="downloadButton"\s+href="([^"]+)"/);
-                    if (match && match[1]) {
-                        finalStreamUrl = match[1];
-                        await kv.set(cacheKey, finalStreamUrl, { ex: 10800 }); 
-                    } else {
-                        return c.text("MediaFire Blocked/Removed", 404);
-                    }
-                } catch (e) {
-                    return c.text("Scraping Error", 502);
+            // ==================================================
+            // CACHE REMOVED: Always Scrape Fresh Link
+            // အမြဲတမ်း Link အသစ်ကို ယူမှ အဆင်ပြေမှာပါ
+            // ==================================================
+            try {
+                const pageRes = await fetch(fileData.url, { 
+                    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } 
+                });
+                const html = await pageRes.text();
+                
+                let match = html.match(/aria-label="Download file"\s+href="([^"]+)"/);
+                if (!match) match = html.match(/id="downloadButton"\s+href="([^"]+)"/);
+                
+                if (match && match[1]) {
+                    finalStreamUrl = match[1];
+                    // Note: No kv.set here anymore
+                } else {
+                    return c.text("MediaFire Blocked/Removed", 404);
                 }
+            } catch (e) {
+                return c.text("Scraping Error", 502);
             }
         } else {
             finalStreamUrl = fileData.url;
@@ -116,11 +110,20 @@ async function handleRequest(c: any, filename: string, method: string) {
         if (rangeHeader) fetchHeaders.set("Range", rangeHeader);
 
         const fileRes = await fetch(finalStreamUrl, { method: method, headers: fetchHeaders });
+
+        // Check if MediaFire returned HTML (Error Page) instead of Video
+        const contentType = fileRes.headers.get("content-type");
+        if (contentType && contentType.includes("text/html")) {
+            // HTML ပြန်လာရင် Link ပျက်နေပြီလို့ သတ်မှတ်မယ်
+            return c.text("Error: MediaFire sent a webpage instead of the file. Please refresh.", 502);
+        }
+
         const newHeaders = new Headers();
         ["content-type", "content-length", "content-range", "accept-ranges", "last-modified", "etag"].forEach(h => {
             const val = fileRes.headers.get(h);
             if (val) newHeaders.set(h, val);
         });
+        
         newHeaders.set("Content-Disposition", `attachment; filename="${filename}"`);
         newHeaders.set("Access-Control-Allow-Origin", "*");
         newHeaders.set("Accept-Ranges", "bytes");
